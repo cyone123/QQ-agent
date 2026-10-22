@@ -10,13 +10,26 @@ process.on('uncaughtException', (error) => {
 });
 
 const app = createApp();
-app.start().catch((error) => {
-  console.error('[启动失败]', error);
-  process.exit(1);
-});
-
-process.on('SIGINT', async () => {
+let shutdownPromise = null;
+function shutdown(exitCode = 0) {
+  if (shutdownPromise) return shutdownPromise;
   console.log('退出中…');
-  await app.stop();
-  process.exit(0);
+  // 小于实例锁的 30 秒保险丝，也为 Docker 的 40 秒宽限留出余量。
+  const deadline = setTimeout(() => {
+    console.error('[退出超时] 25 秒内未完成清理');
+    process.exit(1);
+  }, 25000);
+  shutdownPromise = app.stop().then(() => {
+    clearTimeout(deadline);
+    process.exit(exitCode);
+  }, error => {
+    console.error('[退出失败]', error);
+    process.exit(1);
+  });
+  return shutdownPromise;
+}
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => shutdown());
+app.start().catch(error => {
+  console.error('[启动失败]', error);
+  shutdown(1);
 });

@@ -74,7 +74,10 @@ export function releaseInstanceLock() {
 }
 
 /** 注册退出时自动释放锁（SIGINT/SIGTERM/正常 exit）。 */
+let cleanupRegistered = false;
 export function registerLockCleanup() {
+  if (cleanupRegistered) return;
+  cleanupRegistered = true;
   const cleanup = () => releaseInstanceLock();
   // 锁的**唯一**释放时机是 'exit' 钩子：SIGINT 时立即释放会让优雅退出
   //（server.js 的 await app.stop()，可能数秒）期间新实例抢先拿锁、

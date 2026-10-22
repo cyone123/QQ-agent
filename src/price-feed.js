@@ -204,6 +204,12 @@ export function priceFeedStatus() {
   return { ...status, url: FIXED_PRICE_FEED_URL };
 }
 
+export function stopPriceFeed() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  status.enabled = false;
+}
+
 // 测试专用：生产调用方永远不应设置此值；不提供给 HTTP/UI。
 export function setPriceFeedTestUrl(url = '') {
   testOverrideUrl = String(url || '').trim();

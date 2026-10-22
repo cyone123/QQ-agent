@@ -106,10 +106,12 @@ export async function report(log) {
 }
 
 export function startTelemetryLoop(log = console.log) {
+  let timer = null;
   const first = setTimeout(() => {
     report(log);
-    const timer = setInterval(() => report(log), INTERVAL_MS);
+    timer = setInterval(() => report(log), INTERVAL_MS);
     timer.unref?.();
   }, FIRST_DELAY_MS);
   first.unref?.();
+  return () => { clearTimeout(first); if (timer) clearInterval(timer); };
 }

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERSONAS } from './personas.js';
+import { validateDeploymentConfig } from './deployment-config.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,7 @@ import { profileSuffix, portOffset } from './profile.js';
 // 证书与内容已实测可达（同一路径，nginx 直接 200）。
 export const FIXED_PRICE_REMOTE_URL = 'https://kondius.cn/qq-agent/model-prices.json';
 export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, `data${profileSuffix()}`);
+if (!path.isAbsolute(DATA_DIR)) throw new Error('QQ_AGENT_DATA_DIR 必须为绝对目录');
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 export const DEFAULT_CONFIG = {
@@ -163,6 +165,7 @@ export const DEFAULT_CONFIG = {
   },
   // SnowLuma / OneBot v11
   snowluma: {
+    mode: 'local',             // external 仅连接显式地址，不管理协议端进程
     dir: '',                   // SnowLuma 程序目录；留空 = 自动探测项目内 ./snowluma
     autoLaunch: false,         // 应用启动时自动拉起 SnowLuma（未运行时）
     // 第二实例默认连自己的 OneBot 端口（3001/3000 + 偏移），
@@ -172,6 +175,7 @@ export const DEFAULT_CONFIG = {
     accessToken: '',           // WebSocket 令牌
     httpAccessToken: ''        // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
   },
+  media: { sendLocalMode: 'auto', pathMappings: [] },
   // 人设与行为
   persona: {
     botName: '小鲸鱼',
@@ -366,10 +370,11 @@ export const DEFAULT_CONFIG = {
   },
   // 桌面端/控制台
   server: {
-    // 端口：QQ_AGENT_PORT 显式覆盖 > 默认 3210 + PROFILE 偏移
+    host: '127.0.0.1',
+    // 运行时监听：QQ_AGENT_PORT 显式覆盖 > 磁盘配置 > 默认 3210 + PROFILE 偏移
     // （第二实例整体 +100，避免和主实例撞端口）
-    port: Number(process.env.QQ_AGENT_PORT) || (3210 + portOffset()),
-    token: '',                // 留空 = 只监听 127.0.0.1
+    port: 3210 + portOffset(),
+    token: '',                // 留空 = 无额外 API 令牌校验；监听范围由 host 决定
     autoStart: false,         // 开机自启（仅 Electron 桌面端生效）
     closeToTray: true         // 点关闭 = 最小化到托盘
   },
@@ -405,11 +410,12 @@ export function deepMerge(base, override) {
 }
 
 export function loadConfig() {
+  let loaded;
   try {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
-    return deepMerge(DEFAULT_CONFIG, stripObsoleteFields(migrateLegacySkills(parsed)));
+    loaded = deepMerge(DEFAULT_CONFIG, stripObsoleteFields(migrateLegacySkills(parsed)));
   } catch (error) {
     // ⚠️ 配置文件坏了（手改错/磁盘故障）不能静默回落默认值：
     //   曾经直接返回 DEFAULT，随后任何 updateConfig（比如 5 分钟一次的
@@ -428,8 +434,10 @@ export function loadConfig() {
     } catch (backupError) {
       console.error('[config] 配置文件解析失败且备份失败：', backupError);
     }
-    return structuredClone(DEFAULT_CONFIG);
+    loaded = structuredClone(DEFAULT_CONFIG);
   }
+  // 语义错误必须明确阻止启动，不能把可解析的用户配置改名/回落默认值。
+  return validateDeploymentConfig(loaded);
 }
 
 /**
@@ -537,6 +545,11 @@ export function stripObsoleteFields(node) {
 }
 
 let currentConfig = null;
+const configListeners = new Set();
+export function onConfigChange(listener) {
+  configListeners.add(listener);
+  return () => configListeners.delete(listener);
+}
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig() {
@@ -603,7 +616,9 @@ export function updateConfig(patch) {
   // 测试报 invalid API key）。这里在合并前把"patch 条目缺密钥字段"的数组按 id
   // 回填现值；想真清除必须显式传 apiKey: ''（专用清除按钮就是显式空串路径）。
   preserveSanitizedSecrets(getConfig(), cleanObsolete);
-  currentConfig = deepMerge(getConfig(), cleanObsolete);
+  const previous = getConfig();
+  const next = validateDeploymentConfig(deepMerge(previous, cleanObsolete));
+  currentConfig = next;
   // 磁盘上可能已经存过历史遗留的派生标记，一并清掉
   stripDerivedFlags(currentConfig);
   stripObsoleteFields(currentConfig);
@@ -618,10 +633,13 @@ export function updateConfig(patch) {
     currentConfig.store.randomPercent = randomPercent;
   }
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
-  fs.renameSync(tmp, CONFIG_FILE);
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
+    fs.renameSync(tmp, CONFIG_FILE);
+  } catch (error) { currentConfig = previous; throw error; }
+  for (const listener of configListeners) listener(currentConfig, previous);
   return currentConfig;
 }
 

@@ -33,6 +33,7 @@ import { safeFetchBinary, browseLockState } from './safe-fetch.js';
 import { getGlobalBlocklist, updateGlobalBlocklist, FIXED_PRICE_FEED_URL } from './community.js';
 import { listAccounts, removeAccount, loginAccount, publishModule, verifyInstallCodes, installByCode } from './market.js';
 import { detectDialect as detectThinkingDialect } from './thinking.js';
+import { isExternal, protocolCapabilities } from './deployment-config.js';
 
 /**
  * 构建路由表。
@@ -95,9 +96,10 @@ export function createRoutes(deps) {
         // ┚ SnowLuma 运行判定用 WebUI 端口（进程即起即听）。
         // WS 3001 要等账号登录后才监听，用它判"运行中"会把"起了但未登录"
         // 误报成"未运行"（进而触发二次拉起 → 双实例管道冲突）。
-        const webuiPort = deps.snowlumaWebuiPort();
+        const external = isExternal(cfgNow);
+        const webuiPort = external ? null : deps.snowlumaWebuiPort();
         // 两个端口探测并行：串行时最坏 1.6s（各 800ms 超时），/api/status 每次都卡这么久
-        const [slRunning, obPortOpen] = await Promise.all([
+        const [slRunning, obPortOpen] = external ? [null, null] : await Promise.all([
           deps.isPortOpen('127.0.0.1', webuiPort),
           deps.isPortOpen('127.0.0.1', snowlumaWsPort())
         ]);
@@ -109,15 +111,21 @@ export function createRoutes(deps) {
           else if (String(onebot.lastConnectError || '').includes('401')) onebotDiagnosis = '访问令牌不匹配：正在自动轮换重试，若持续出现请在设置里核对 OneBot 令牌';
           else onebotDiagnosis = onebot.lastConnectError ? `连接失败：${String(onebot.lastConnectError).slice(0, 120)}` : '连接中…';
         }
+        if (external) onebotDiagnosis = onebot.diagnosis();
         return json(res, 200, {
+          capabilities: protocolCapabilities(cfgNow),
+          server: deps.runtimeServerStatus?.(),
           onebot: {
             connected: onebot.connected,
             everConnected: onebot.everConnected,
             error: onebot.lastConnectError,
             diagnosis: onebotDiagnosis,
-            self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
+            http: onebot.httpStatus,
+            connectionTest: onebot.connectionTest,
+            self: onebot.selfInfo?.user_id ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
           },
           snowluma: {
+            mode: cfgNow.snowluma?.mode || 'local',
             dir: snowlumaDir(),
             running: slRunning,
             webuiUrl: snowlumaWebuiUrl(),
@@ -134,6 +142,10 @@ export function createRoutes(deps) {
           dataDir: DATA_DIR
         });
       }
+    },
+    {
+      method: 'POST', pattern: '/api/onebot/test-connection',
+      handler: async ({ res, json }) => json(res, 200, await onebot.testConnection())
     },
     {
       method: 'POST', pattern: '/api/open-data-dir',
@@ -257,7 +269,7 @@ export function createRoutes(deps) {
       method: 'POST', pattern: '/api/snowluma/stop',
       handler: async ({ res, json }) => {
         try {
-          const stopped = stopSnowluma();
+          const stopped = await stopSnowluma();
           return json(res, 200, { ok: true, stopped, embedded: snowlumaStatus().embedded, pid: snowlumaStatus().pid });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -1574,5 +1586,17 @@ export function createRoutes(deps) {
         return undefined;   // 已自行写响应
       }
     },
-  ];
+  ].map(route => {
+    const desktopOnly = ['/api/open-data-dir', '/api/snowluma/open-folder', '/api/snowluma/open-webui'];
+    const localOnly = [...desktopOnly, '/api/snowluma/launch', '/api/snowluma/stop',
+      '/api/qq-portable/launch', '/api/qq-portable/stop'];
+    if (!localOnly.includes(route.pattern)) return route;
+    const handler = route.handler;
+    return { ...route, handler: async ctx => {
+      if (isExternal(getConfig()) || (desktopOnly.includes(route.pattern) && process.platform !== 'win32')) {
+        return ctx.json(ctx.res, 409, { ok: false, code: 'UNSUPPORTED_MODE', error: '当前模式不支持本地桌面或进程操作，请在协议端服务器管理 QQ/SnowLuma' });
+      }
+      return handler(ctx);
+    } };
+  });
 }

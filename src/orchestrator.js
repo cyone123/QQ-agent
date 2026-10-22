@@ -644,7 +644,7 @@ export class Orchestrator {
     }
 
     // 记忆自动整理（后台静默，绝不阻塞/影响聊天主流程）
-    this.#maybeConsolidateMemory(chatKey);
+    if (!this.aborted) this.#maybeConsolidateMemory(chatKey);
   }
 
   /**
@@ -1905,6 +1905,18 @@ export class Orchestrator {
     for (const sessionId of this.pendingSessions.values()) this.#finishWaiting(sessionId, 'aborted');
     this.pendingSessions.clear();
     this.stopProactiveLoop();
+  }
+
+  /** 核心停机：中断在途模型请求，并等运行中的会话完成 aborted 落盘。 */
+  async shutdown() {
+    await this.abortAll();
+    for (const sessionId of this.activeRuns.values()) this.sessionAbortMarks.add(sessionId);
+    for (const controller of this.sessionAbortControllers.values()) controller.abort(new Error('核心正在停止'));
+    const deadline = Date.now() + 15000;
+    while (this.runningChats.size > 0) {
+      if (Date.now() >= deadline) throw new Error('停机会话清理超时');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
   }
 
   statusSummary() {

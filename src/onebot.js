@@ -3,6 +3,7 @@
 import WebSocket from 'ws';
 import { sanitizeUserText, escapeCqText } from './util.js';
 import { skillManager } from './skills/manager.js';
+import { redactConnectionText } from './deployment-config.js';
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
@@ -96,6 +97,8 @@ export class OneBotClient {
     this.selfInfo = null;      // { user_id, nickname }
     this.#closedByUs = false;
     this.statusListeners = new Set();
+    this.httpStatus = { available: null, checkedAt: null, error: '' };
+    this.connectionTest = null;
   }
 
   #closedByUs;
@@ -103,6 +106,66 @@ export class OneBotClient {
   #connectGeneration = 0;  // 连接循环代际号：新循环启动即作废旧循环（防并发僵尸循环）
   #reconnectTimer = null;  // 待执行的重连定时器（close/reconnect 时要清，防泄漏）
   #selfInfoTimer = null;   // get_login_info 延迟补拉定时器
+  #requests = new Set();
+  #testPromise = null;
+  #acceptCalls = true;
+
+  redact(value) {
+    const secrets = [this.accessToken, this.httpToken];
+    for (const endpoint of [this.wsUrl, this.httpUrl]) {
+      try { for (const [key, value] of new URL(endpoint).searchParams) if (/token|key|authorization/i.test(key)) secrets.push(value); } catch { /* invalid URL */ }
+    }
+    return redactConnectionText(value, secrets);
+  }
+
+  diagnosis() {
+    const error = `${this.lastConnectError} ${this.httpStatus.error}`;
+    if (/\b(?:401|403)\b/.test(error)) return '外部 OneBot 鉴权失败：请核对 WS/HTTP 令牌及服务端配置';
+    if (/ENOTFOUND|EAI_AGAIN/.test(error)) return 'OneBot 域名解析失败：请检查地址与 Docker 网络';
+    if (/ECONNREFUSED/.test(error)) return 'OneBot 拒绝连接：请检查服务监听地址、端口和网络';
+    if (/timeout|超时|ETIMEDOUT/i.test(error)) return 'OneBot 连接超时：请检查网络及协议端状态';
+    if (!this.connected) return this.lastConnectError ? `OneBot 连接失败：${this.lastConnectError}` : '正在连接 OneBot，后台将自动重试';
+    if (!this.selfInfo?.user_id) return 'WS 已连接，账号尚未就绪或 HTTP API 不可用，请测试连接';
+    if (this.httpStatus.available === false) return 'WS 已连接，HTTP API 检查失败，请测试连接';
+    return '';
+  }
+
+  async testConnection() {
+    if (this.#testPromise) return this.#testPromise;
+    if (this.connectionTest && Date.now() - this.connectionTest.checkedAt < 10000) return this.connectionTest;
+    const generation = this.#connectGeneration;
+    const promise = (async () => {
+      const results = await Promise.allSettled(['get_version_info', 'get_login_info'].map(action => this.call(action, {}, 5000)));
+      const [version, login] = results.map(r => r.status === 'fulfilled'
+        ? { ok: true, data: r.value } : { ok: false, error: this.redact(r.reason?.message) });
+      const result = { checkedAt: Date.now(), wsConnected: this.connected, version, login,
+        ok: this.connected && version.ok && login.ok && Boolean(login.data?.user_id) };
+      if (generation === this.#connectGeneration && !this.#closedByUs) {
+        this.connectionTest = result;
+        this.httpStatus = { available: version.ok && login.ok, checkedAt: result.checkedAt,
+          error: !version.ok ? version.error : !login.ok ? login.error : '' };
+        this.selfInfo = login.ok ? login.data : null;
+        if (this.connected && !this.selfInfo?.user_id) this.#refreshSelfInfoLater();
+      }
+      return result;
+    })();
+    this.#testPromise = promise;
+    try { return await promise; } finally { if (this.#testPromise === promise) this.#testPromise = null; }
+  }
+
+  configure({ wsUrl, httpUrl, accessToken, httpToken }) {
+    this.close();
+    this.wsUrl = wsUrl;
+    this.httpUrl = httpUrl.replace(/\/+$/, '');
+    this.accessToken = String(accessToken || '');
+    this.httpToken = String(httpToken || accessToken || '');
+    this.connectionTest = null;
+    this.#testPromise = null;
+    this.httpStatus = { available: null, checkedAt: null, error: '' };
+    this.lastConnectError = '';
+    this.everConnected = false;
+    return this.reconnect();
+  }
 
   onStatus(fn) {
     this.statusListeners.add(fn);
@@ -118,12 +181,17 @@ export class OneBotClient {
   }
 
   async connect() {
+    if (this.socket || this.#reconnectTimer) return this.reconnect();
+    this.#acceptCalls = true;
     this.#closedByUs = false;
     this.#connectLoop();
   }
 
   /** 连接配置可能变了（比如从 SnowLuma 配置同步到了新令牌），重连一次。 */
   async reconnect() {
+    this.#acceptCalls = true;
+    this.selfInfo = null;
+    if (this.#selfInfoTimer) { clearTimeout(this.#selfInfoTimer); this.#selfInfoTimer = null; }
     // 关键：先作废旧 socket，再启新连接。否则旧 socket 的 close 事件稍后到达时
     // 会误以为需要再次重连，造成两个 WebSocket 同时连着 SnowLuma，所有事件收到两份。
     const old = this.socket;
@@ -136,6 +204,7 @@ export class OneBotClient {
     if (this.#reconnectTimer) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
     try { old?.close(); } catch { /* ignore */ }
     this.#connectLoop();
+    this.#setStatus(false);
   }
 
   #connectLoop() {
@@ -170,15 +239,16 @@ export class OneBotClient {
   #openSocket(generation) {
     if (this.#closedByUs) return;
     if (generation !== this.#connectGeneration) return;
-    let url = this.wsUrl;
-    if (this.accessToken) url += (url.includes('?') ? '&' : '?') + `access_token=${encodeURIComponent(this.accessToken)}`;
     let socket;
     try {
+      const url = new URL(this.wsUrl);
+      if (this.accessToken) url.searchParams.set('access_token', this.accessToken);
       socket = new WebSocket(url, {
+        handshakeTimeout: 10000,
         headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {}
       });
     } catch (error) {
-      this.lastConnectError = String(error?.message ?? error);
+      this.lastConnectError = this.redact(error?.message ?? error);
       this.#setStatus(false);
       // 指数退避：连续构造失败时间隔翻倍，封顶 RECONNECT_MAX_MS ——
       // 曾经固定 RECONNECT_MIN_MS（3 秒一次重试风暴，RECONNECT_MAX_MS 形同虚设）
@@ -196,7 +266,7 @@ export class OneBotClient {
     }
     // 每个 socket 的事件处理器都先验证"我还是不是当前 socket"，
     // 旧连接被作废后其迟到事件直接忽略，避免重复重连/状态错乱。
-    const isCurrent = (s) => this.socket === s;
+    const isCurrent = (s) => this.socket === s && generation === this.#connectGeneration;
 
     socket.on('open', async () => {
       if (!isCurrent(socket)) return;
@@ -204,8 +274,13 @@ export class OneBotClient {
       this.#failedAttempts = 0;   // 连上了，退避计数清零
       this.#setStatus(true);
       try {
-        this.selfInfo = await this.call('get_login_info');
+        const info = await this.call('get_login_info');
+        if (!isCurrent(socket)) return;
+        this.selfInfo = info;
+        this.#setStatus(true);
+        if (!info?.user_id) this.#refreshSelfInfoLater();
       } catch (error) {
+        if (!isCurrent(socket)) return;
         console.error('[onebot] 获取登录信息失败:', error?.message ?? error);
         // get_login_info 失败不代表连接不可用（可能是 SnowLuma 还在启动中）。
         // 挂一个延迟补拉：连着但 selfInfo 一直空 → /api/status 的 self 恒为 null，
@@ -222,6 +297,9 @@ export class OneBotClient {
     });
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
+      this.socket = null;
+      if (this.#selfInfoTimer) { clearTimeout(this.#selfInfoTimer); this.#selfInfoTimer = null; }
+      this.selfInfo = null;
       this.#setStatus(false);
       if (!this.#closedByUs) {
         // 指数退避：长断线时 3 秒一次的重试风暴既刷屏又占资源；
@@ -233,7 +311,7 @@ export class OneBotClient {
     });
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
-      this.lastConnectError = String(error?.message ?? error);
+      this.lastConnectError = this.redact(error?.message ?? error);
       // ⚠️ 广播状态不能只看 everConnected（2026-09-19）：曾经"连上过一次就不再广播
       // 失败状态"，导致长连接断开后的持续 401 在 UI 上毫无感知（状态一直是"已连接"），
       // 令牌轮换的恢复钩子也收不到信号。现在每次 error 都广播，由监听方自行去重。
@@ -244,29 +322,58 @@ export class OneBotClient {
   /** 连接活着但 selfInfo 为空时，定期补拉 get_login_info（SnowLuma 慢启动场景）。 */
   #refreshSelfInfoLater() {
     if (this.#selfInfoTimer) return;
+    const generation = this.#connectGeneration;
+    const socket = this.socket;
     const timer = setTimeout(async () => {
       this.#selfInfoTimer = null;
-      if (!this.connected || this.selfInfo) return;
+      if (!this.connected || this.selfInfo?.user_id) return;
       try {
-        this.selfInfo = await this.call('get_login_info');
+        const info = await this.call('get_login_info');
+        if (generation !== this.#connectGeneration || this.socket !== socket || !this.connected) return;
+        this.selfInfo = info;
         if (this.selfInfo) this.#setStatus(true);   // 触发一次状态广播，UI 拿到账号信息
-      } catch { /* 还没就绪就等下一轮事件驱动；下一条消息到达时 open 流程不会再补 —— 靠这个定时器最多再试一次 */ }
+      } catch { /* 未就绪时继续补拉 */ }
+      if (generation === this.#connectGeneration && this.socket === socket && this.connected && !this.selfInfo?.user_id) this.#refreshSelfInfoLater();
     }, SELF_INFO_RETRY_MS);
     this.#selfInfoTimer = timer;
   }
 
   close() {
+    this.#acceptCalls = false;
+    ++this.#connectGeneration;
     this.#closedByUs = true;
+    this.selfInfo = null;
+    for (const controller of this.#requests) controller.abort();
     if (this.#reconnectTimer) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
     if (this.#selfInfoTimer) { clearTimeout(this.#selfInfoTimer); this.#selfInfoTimer = null; }
     const old = this.socket;
     this.socket = null;
-    try { old?.close(); } catch { /* ignore */ }
+    try { old?.terminate(); } catch { /* ignore */ }
     this.#setStatus(false);
   }
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action, params = {}, timeoutMs = null) {
+    if (!this.#acceptCalls) throw new Error('OneBot 客户端已关闭');
+    const generation = this.#connectGeneration;
+    const controller = new AbortController();
+    this.#requests.add(controller);
+    const secrets = [this.accessToken, this.httpToken];
+    const limit = timeoutMs ?? (SLOW_ACTION.test(action) ? SEND_TIMEOUT_MS : CALL_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), limit);
+    timer.unref?.();
+    try {
+      const data = await this.#call(action, params, timeoutMs, controller.signal);
+      if (generation === this.#connectGeneration) this.httpStatus = { available: true, checkedAt: Date.now(), error: '' };
+      return data;
+    } catch (error) {
+      const safeError = new Error(redactConnectionText(this.redact(error?.message ?? error), secrets));
+      if (generation === this.#connectGeneration) this.httpStatus = { available: false, checkedAt: Date.now(), error: safeError.message };
+      throw safeError;
+    } finally { clearTimeout(timer); this.#requests.delete(controller); }
+  }
+
+  async #call(action, params = {}, timeoutMs = null, signal) {
     // ── 超时按 action 分档（这里修过一个真实故障）──────────────────────────
     // 原来一律 15 秒。查询类够用，但**发送类不够**：图片/视频以 base64 或大 body
     // 发出去时，协议端要走完「接收 body → 解码 → 上传腾讯服务器 → 返回」，
@@ -276,14 +383,16 @@ export class OneBotClient {
     const limit = timeoutMs ?? (SLOW_ACTION.test(action) ? SEND_TIMEOUT_MS : CALL_TIMEOUT_MS);
     let res;
     try {
-      res = await fetch(`${this.httpUrl}/${action}`, {
+      const url = new URL(this.httpUrl);
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/${action}`;
+      res = await fetch(url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
         },
         body: JSON.stringify(params),
-        signal: AbortSignal.timeout(limit)
+        signal
       });
     } catch (error) {
       // fetch 只在网络层失败时抛，且 message 恒为 "fetch failed" —— 丢给上层
@@ -300,7 +409,10 @@ export class OneBotClient {
         : '';
       throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
     }
-    const body = await res.json().catch(() => ({}));
+    const body = await res.json().catch(() => {
+      if (signal.aborted) throw signal.reason;
+      throw new Error(`OneBot ${action} 返回的不是合法 JSON`);
+    });
     if (body.status !== 'ok' && body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
     }
