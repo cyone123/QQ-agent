@@ -1,0 +1,47 @@
+name: qq-agent
+services:
+  qq-agent:
+    image: qq-agent:${QQ_AGENT_IMAGE_TAG:-linux-p3-p5}
+    build: .
+    platform: linux/amd64
+    container_name: qq-agent
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: Asia/Shanghai
+      QQ_AGENT_DATA_DIR: /var/lib/qq-agent
+      QQ_AGENT_HOST: "0.0.0.0"
+      QQ_AGENT_PORT: "3210"
+    ports:
+      - "127.0.0.1:3210:3210"
+    volumes:
+      - qq-agent-data:/var/lib/qq-agent
+      - qq-gateway-data:/mnt/snowluma/data:ro
+      - qq-client-data:/mnt/snowluma/qq-share:ro
+    networks:
+      - qq-agent-net
+    stop_grace_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  qq-agent-data:
+    name: qq-agent-data
+  qq-gateway-data:
+    external: true
+    name: qq-gateway-data
+  qq-client-data:
+    external: true
+    name: qq-client-data
+
+networks:
+  qq-agent-net:
+    external: true
+    name: qq-agent-net

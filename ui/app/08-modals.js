@@ -1478,12 +1478,21 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredWsToken = val('#cfg-obtoken', '').trim();
     const enteredHttpToken = val('#cfg-obhttptoken', '').trim();
     patch.snowluma = {
+      mode: val('#cfg-obmode', c.snowluma?.mode || 'local'),
       dir: val('#cfg-snowlumadir', c.snowluma?.dir || '').trim(),
       autoLaunch: chk('#cfg-snowlumalaunch', !!c.snowluma?.autoLaunch),
       wsUrl: val('#cfg-wsurl', c.snowluma?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.snowluma?.httpUrl || '').trim(),
-      ...(enteredWsToken && enteredWsToken !== '******' ? { accessToken: enteredWsToken } : {}),
-      ...(enteredHttpToken && enteredHttpToken !== '******' ? { httpAccessToken: enteredHttpToken } : {})
+      ...($('#cfg-obtoken')?.dataset.clearToken === 'true' && !enteredWsToken ? { accessToken: '' } : enteredWsToken && enteredWsToken !== '******' ? { accessToken: enteredWsToken } : {}),
+      ...($('#cfg-obhttptoken')?.dataset.clearToken === 'true' && !enteredHttpToken ? { httpAccessToken: '' } : enteredHttpToken && enteredHttpToken !== '******' ? { httpAccessToken: enteredHttpToken } : {})
+    };
+    patch.media = {
+      sendLocalMode: val('#cfg-media-send', c.media?.sendLocalMode || 'auto'),
+      pathMappings: JSON.parse(val('#cfg-media-mappings', JSON.stringify(c.media?.pathMappings || [])))
+    };
+    patch.server = {
+      host: val('#cfg-server-host', c.server?.host || '127.0.0.1').trim(),
+      port: Number(val('#cfg-server-port', c.server?.port || 3210))
     };
   }
 

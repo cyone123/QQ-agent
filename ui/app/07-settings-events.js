@@ -31,6 +31,23 @@ function flushSettingsSaves() {
 }
 
 function bindSettingsEvents(c) {
+  for (const [buttonId, field] of [['cfg-obtoken-clear', 'accessToken'], ['cfg-obhttptoken-clear', 'httpAccessToken']]) {
+    const button = $(`#${buttonId}`);
+    if (button) button.addEventListener('click', async () => {
+      try {
+        const input = $(field === 'accessToken' ? '#cfg-obtoken' : '#cfg-obhttptoken');
+        input.value = '';
+        input.dataset.clearToken = 'true';
+        // Use the same serialized autosave queue, so an older save cannot restore the token.
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (error) { const hint = $('#onebot-save-hint'); if (hint) hint.textContent = `清除失败：${error.message}`; }
+    });
+  }
+  const modeSelect = $('#cfg-obmode');
+  if (modeSelect) modeSelect.addEventListener('change', () => {
+    const local = $('#onebot-local-settings');
+    if (local) local.hidden = modeSelect.value === 'external';
+  });
   /* ── 即时保存：任何设置项变动 → 防抖 600ms 自动保存 ──
      变动的设置块背景变成流动的浅黄色渐变（.dirty-glow）。
      黄条的消退时机：**切换设置区块或主页签时**（renderSettings 重渲染会重建
@@ -91,12 +108,16 @@ function bindSettingsEvents(c) {
     beginSettingsGuard();
     try {
       await saveConfig({ quiet: true });
+      const hint = $('#onebot-save-hint');
+      if (hint) hint.textContent = '已保存；连接配置变更自动重连，监听配置需重启。';
       refreshStatus();
       startListPoller();
       // 刷新间隔可能刚被改过：重建状态轮询，让新间隔立刻生效
       startStatusPoller();
     } catch (e) {
       console.error('自动保存失败:', e);
+      const hint = $('#onebot-save-hint');
+      if (hint) hint.textContent = `未保存：${e.message}`;
     } finally {
       saving = false;
       endSettingsGuard();

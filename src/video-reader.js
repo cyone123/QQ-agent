@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { DATA_DIR, getConfig } from './config.js';
 import { safeFetchBinaryToFile } from './safe-fetch.js';
 import { skillManager } from './skills/manager.js';
+import { resolveMediaPath } from './media-paths.js';
 
 /** 允许的抽帧模式取值（配置写错时回退 auto）。 */
 export const VIDEO_MODES = ['auto', 'native', 'frames', 'off'];
@@ -312,13 +313,15 @@ export class VideoReader {
   /** 把视频落地为本地文件路径（OneBot 缓存 → 下载 url）。 */
   async #localize(media) {
     // 路径 0：消息里直接给了本地 path
-    if (media.path && fs.existsSync(String(media.path))) return String(media.path);
+    const direct = resolveMediaPath(media.path);
+    if (direct.ok) return direct.path;
     // 路径 1：OneBot get_video / get_file 拿缓存
     if (media.file) {
       for (const action of ['get_video', 'get_file', 'get_image']) {
         try {
           const ret = await this.onebot.call(action, { file: String(media.file) });
-          const p = ret?.file && fs.existsSync(String(ret.file)) ? String(ret.file) : '';
+          const resolved = resolveMediaPath(ret?.file || ret?.path || ret?.filename);
+          const p = resolved.ok ? resolved.path : '';
           if (p) return p;
           if (ret?.url) {
             const dl = await this.#download(String(ret.url));

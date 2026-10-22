@@ -2,8 +2,8 @@
 
 - 日期：2026-10-22
 - 分支：`codex/linux-external-onebot-plan`
-- 状态：P0、P1、P2 已实现并通过 Windows 下的模拟验证；P3–P6 待实施。Linux 原生信号和真实 SnowLuma 验收仍待进行。
-- 阶段记录：[P0–P2 实施与验证记录](./linux-external-onebot-p0-p2.md)。下文其余未完成阶段的配置和部署文件仍属于设计。
+- 状态：P0–P4 已实现并通过 Windows 下的模拟验证；P5 部署文件已交付，Linux 镜像构建/非 root 运行验收受本机 Docker Engine 不可达阻塞；P6 尚未执行。Linux 原生信号和真实 SnowLuma 验收仍待进行。
+- 阶段记录：[P0–P2 实施与验证记录](./linux-external-onebot-p0-p2.md)、[P3–P5 实施与验证记录](./linux-external-onebot-p3-p5.md)。可执行部署步骤以 [Linux 部署文档](./linux-deployment.md) 为准；下文为原始设计依据。
 - 目标：在 Linux 上独立部署 QQ Agent 核心，连接现有 Docker SnowLuma，保留网页控制台、记忆、存档和媒体能力。
 
 ## 1. 已确认的部署基础
@@ -203,7 +203,7 @@ docker run -d \
 
 ## 8. 目标 Compose
 
-保留现有 snowluma 容器，新增以下独立 Compose。配置在代码实现完成后才可直接使用：
+保留现有 snowluma 容器，目标 Compose 如下（实际交付见仓库根目录 `compose.yaml`）：
 
 ```yaml
 services:

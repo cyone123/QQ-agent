@@ -15,8 +15,8 @@ async function refreshSnowlumaLogs() {
   if (!slPre && !qqPre && !appPre) return;   // 页面还没渲染过，等下次整页刷新
   try {
     const [logs, qqLogs, appLogsData] = await Promise.all([
-      api('/api/snowluma/logs'),
-      api('/api/qq-portable/logs').catch(() => ({ logs: [] })),
+      slPre ? api('/api/snowluma/logs') : Promise.resolve({ logs: [] }),
+      qqPre ? api('/api/qq-portable/logs').catch(() => ({ logs: [] })) : Promise.resolve({ logs: [] }),
       api('/api/logs?limit=120').catch(() => ({ logs: [] }))
     ]);
     const fmt = (arr) => (arr || []).map((l) => {
@@ -56,8 +56,13 @@ function scheduleSnowlumaReload(opts = {}) {
 
 async function loadSnowlumaPage({ quiet = false } = {}) {
   try {
+    const current = await api('/api/status');
+    if (current.snowluma?.mode === 'external') {
+      renderExternalOnebotPage(current);
+      return;
+    }
     const [status, logs, qqLogs, appLogsData] = await Promise.all([
-      api('/api/status'),
+      Promise.resolve(current),
       api('/api/snowluma/logs'),
       api('/api/qq-portable/logs'),
       api('/api/logs?limit=120').catch(() => ({ logs: [], level: 'info' }))
@@ -358,4 +363,47 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
   } catch (e) {
     if (!quiet) console.error(e);
   }
+}
+
+function renderExternalOnebotPage(status) {
+  const box = $('#snowluma-page');
+  if (!box) return;
+  const ob = status.onebot || {};
+  const test = ob.connectionTest;
+  box.innerHTML = `<div class="snowluma-page-card">
+    <h2>外部 OneBot（SnowLuma）</h2>
+    <p>QQ 与 SnowLuma 由服务器独立管理。连接中断后 Agent 会自动重试，你仍可进入设置修改配置。</p>
+    <div class="field">正向 WS：<code>${esc(ob.endpoints?.ws || '')}</code></div>
+    <div class="field">HTTP API：<code>${esc(ob.endpoints?.http || '')}</code></div>
+    <div class="field">事件连接：${ob.connected ? '已连接' : '未连接'}</div>
+    <div class="field">HTTP：${ob.http?.available === true ? '最近调用成功' : ob.http?.available === false ? '最近调用失败' : '尚未检查'}${ob.http?.checkedAt ? `（${esc(fmtTime(ob.http.checkedAt))}）` : ''}</div>
+    <div class="field">账号：${ob.self ? `${esc(ob.self.nickname)}（${esc(ob.self.userId)}）` : '尚未就绪'}</div>
+    <p>${esc(ob.diagnosis || '连接已就绪')}</p>
+    <button type="button" class="btn btn-primary" id="external-test-btn">测试连接</button>
+    <button type="button" class="btn" id="external-refresh-btn">刷新状态</button>
+    <button type="button" class="btn" id="external-settings-btn">连接设置</button>
+    <div id="external-test-result" class="hint">${test ? `上次检查：${esc(fmtTime(test.checkedAt))}，${test.ok ? '通过' : '未通过'}` : '测试 get_version_info 与 get_login_info，结果缓存 10 秒。'}</div>
+    <p class="hint">管理 SnowLuma WebUI 时另行建立 SSH 转发，例如 ssh -N -L 5099:127.0.0.1:5099 用户@服务器，然后在浏览器打开 http://127.0.0.1:5099。</p>
+    <div class="sl-log-block"><div class="hint">Agent 应用日志</div><pre class="snowluma-logs-view" id="app-logs-view">加载中…</pre></div>
+  </div>`;
+  $('#external-refresh-btn').addEventListener('click', () => loadSnowlumaPage());
+  $('#external-settings-btn').addEventListener('click', () => {
+    state.settingsSection = 'onebot';
+    switchTab('settings');
+  });
+  $('#external-test-btn').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    const result = $('#external-test-result');
+    result.textContent = '检查中…';
+    try {
+      const r = await api('/api/onebot/test-connection', { method: 'POST', body: '{}' });
+      result.textContent = `WS：${r.wsConnected ? '已连接' : '未连接'}；版本 API：${r.version?.ok ? '成功' : r.version?.error || '失败'}；账号 API：${r.login?.ok && r.login?.data?.user_id ? '已就绪' : r.login?.error || '账号尚未就绪'}；${r.ok ? '检查通过' : '检查未通过'}（${fmtTime(r.checkedAt)}）`;
+      refreshStatus();
+    } catch (error) { result.textContent = `检查失败：${error.message}`; }
+    finally { const button = $('#external-test-btn'); if (button) button.disabled = false; }
+  });
+  api('/api/logs?limit=120').then((r) => {
+    const pre = $('#app-logs-view');
+    if (pre) pre.textContent = (r.logs || []).map(l => `[${fmtTime(l.ts)}] ${l.text}`).join('\n') || '暂无日志';
+  }).catch(() => {});
 }

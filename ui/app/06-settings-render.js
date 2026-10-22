@@ -45,7 +45,7 @@ function renderSettingsSidebar() {
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['chat', '聊天设置'],
-    ['desktop', '桌面端'],
+    ['desktop', s?.snowluma?.mode === 'external' ? '界面与数据' : '桌面端'],
     ['onebot', 'OneBot（SnowLuma）'],
     ['tools', '工具与技能']
   ];
@@ -973,12 +973,14 @@ return `
 }
 
 function renderDesktopSection(c) {
+  const desktop = c.snowluma?.mode !== 'external' && state.status?.capabilities?.desktopActions !== false;
   return `
+    ${desktop ? `
     <h3>桌面端</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-autostart" ${c.server?.autoStart ? 'checked' : ''} />
       <label for="cfg-autostart">开机自启</label></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-closetray" ${c.server?.closeToTray !== false ? 'checked' : ''} />
-      <label for="cfg-closetray">点关闭时最小化到托盘</label></div>
+      <label for="cfg-closetray">点关闭时最小化到托盘</label></div>` : '<div class="hint">服务器进程由 Docker 管理；镜像升级与数据备份请参照 Linux 部署文档。</div>'}
     <h3>界面</h3>
     <div class="field"><label>主题</label>
       <div class="theme-picker" id="theme-picker">
@@ -996,7 +998,7 @@ function renderDesktopSection(c) {
     <div class="field"><label>用户数据目录</label>
       <div style="display:flex;gap:8px">
         <input type="text" id="cfg-datadir" readonly value="${esc(state.dataDir || '（加载中…）')}" style="flex:1" />
-        <button class="btn btn-small" id="open-datadir-btn">打开文件夹</button>
+        ${desktop ? '<button class="btn btn-small" id="open-datadir-btn" type="button">打开文件夹</button>' : ''}
       </div>
       <div class="hint">所有用户数据（配置、聊天记录、记忆、表情包）都存在这个目录里。删除后重启应用即为初始形态。</div>
     </div>
@@ -1014,17 +1016,22 @@ function renderDesktopSection(c) {
 }
 
 function renderOnebotSection(c) {
+  const external = c.snowluma?.mode === 'external';
   return `
     <h3 id="settings-onebot">OneBot（SnowLuma）</h3>
-    <div class="hint" style="margin-bottom:10px">SnowLuma 的启动、关闭与日志已移动到顶部「SnowLuma」页签。此处只保留连接配置。</div>
+    <div class="field"><label>协议端模式</label><select id="cfg-obmode">
+      <option value="local" ${!external ? 'selected' : ''}>本地托管</option><option value="external" ${external ? 'selected' : ''}>外部 OneBot（Linux / Docker）</option></select></div>
+    <div class="hint">外部模式使用正向 WS 收事件、HTTP 发消息；QQ 与 SnowLuma 由服务器独立管理，离线时也可配置控制台。</div>
+    <div id="onebot-local-settings" ${external ? 'hidden' : ''}>
     <div class="field"><label>SnowLuma 程序目录（留空 = 自动使用项目内 snowluma/ 文件夹）</label>
       <div style="display:flex;gap:8px">
         <input type="text" id="cfg-snowlumadir" value="${esc(c.snowluma.dir || '')}" style="flex:1" />
-        <button class="btn btn-small" id="open-snowluma-btn">打开文件夹</button>
+        ${state.status?.capabilities?.desktopActions ? '<button class="btn btn-small" id="open-snowluma-btn" type="button">打开文件夹</button>' : ''}
       </div>
       <div class="hint" id="snowluma-hint"></div></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-snowlumalaunch" ${c.snowluma.autoLaunch ? 'checked' : ''} />
       <label for="cfg-snowlumalaunch">QQ Agent 启动时自动拉起 SnowLuma（未运行时）</label></div>
+    </div>
     <div class="field-row">
       <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.snowluma.wsUrl)}" /></div>
       <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.snowluma.httpUrl)}" /></div>
@@ -1032,14 +1039,23 @@ function renderOnebotSection(c) {
         <div style="display:flex;gap:8px">
           <input type="password" id="cfg-obtoken" value="${esc(c.snowluma?.hasAccessToken ? '******' : '')}" placeholder="输入新令牌可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-obtoken-toggle" type="button">显示</button>
+          <button class="btn btn-small" id="cfg-obtoken-clear" type="button">清除</button>
         </div></div>
-      <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label>
+      <div class="field"><label>HTTP 令牌（留空沿用 WS；与 WS 不同时填）</label>
         <div style="display:flex;gap:8px">
           <input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma?.hasHttpAccessToken ? '******' : '')}" placeholder="输入新令牌可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-obhttptoken-toggle" type="button">显示</button>
+          <button class="btn btn-small" id="cfg-obhttptoken-clear" type="button">清除</button>
         </div></div>
     </div>
-    <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
+    <div class="hint">模式、地址和 Token 保存后自动重连。令牌留空保持原值；清除已保存令牌使用输入框旁的清除操作。</div>
+    <div class="hint" id="onebot-save-hint" role="status"></div>
+    <h3>媒体共享</h3>
+    <div class="field"><label>本地图片发送</label><select id="cfg-media-send"><option value="auto" ${c.media?.sendLocalMode !== 'base64' ? 'selected' : ''}>自动（保留本地路径优先）</option><option value="base64" ${c.media?.sendLocalMode === 'base64' ? 'selected' : ''}>Base64（推荐外部模式，单张上限 15 MiB）</option></select></div>
+    <div class="field"><label>只读媒体路径映射（JSON 数组，remote → local）</label><textarea id="cfg-media-mappings" rows="6">${esc(JSON.stringify(c.media?.pathMappings || [], null, 2))}</textarea><div class="hint">示例：[{"remote":"/app/data","local":"/mnt/snowluma/data"}]。目录需另行挂载，保存配置不会创建挂载。</div></div>
+    <h3>控制台监听</h3>
+    <div class="field-row"><div class="field"><label>监听地址</label><input id="cfg-server-host" value="${esc(c.server?.host || '127.0.0.1')}" /></div><div class="field"><label>端口</label><input id="cfg-server-port" type="number" min="1" max="65535" value="${esc(c.server?.port || 3210)}" /></div></div>
+    <div class="hint">监听配置需重启；QQ_AGENT_HOST / QQ_AGENT_PORT 环境变量优先。当前监听：${esc(state.status?.server?.listening?.host || '未知')}:${esc(state.status?.server?.listening?.port || '')}${state.status?.server?.restartRequired ? '（配置已变更，需重启）' : ''}。Docker 宿主机使用回环端口映射，通过 SSH 隧道访问。</div>`;
 }
 
 /**

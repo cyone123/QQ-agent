@@ -11,6 +11,7 @@
 // 路由 handler 通过闭包取用，避免在 app.js 里反复传参。
 
 import fs from 'node:fs';
+import { resolveMediaPath, readImageFile } from './media-paths.js';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { getConfig, updateConfig, deepMerge as deepMergeConfig, DATA_DIR } from './config.js';
@@ -116,6 +117,7 @@ export function createRoutes(deps) {
           capabilities: protocolCapabilities(cfgNow),
           server: deps.runtimeServerStatus?.(),
           onebot: {
+            endpoints: { ws: onebot.redact(onebot.wsUrl), http: onebot.redact(onebot.httpUrl) },
             connected: onebot.connected,
             everConnected: onebot.everConnected,
             error: onebot.lastConnectError,
@@ -1346,9 +1348,7 @@ export function createRoutes(deps) {
           const items = Array.isArray(body?.items) ? body.items.slice(0, 20) : [];
           const mimeOf = (p) => /\.png$/i.test(p) ? 'image/png' : /\.gif$/i.test(p) ? 'image/gif' : /\.webp$/i.test(p) ? 'image/webp' : 'image/jpeg';
           const fileToDataUrl = (fp) => {
-            const st = fs.statSync(fp);
-            if (st.size > 15 * 1024 * 1024) return null;
-            return `data:${mimeOf(fp)};base64,${fs.readFileSync(fp).toString('base64')}`;
+            return `data:${mimeOf(fp)};base64,${readImageFile(fp).toString('base64')}`;
           };
           // 下载一律走 safe-fetch：这里的 url 来自请求体（前端/任何本机进程都能构造），
           // 直接 fetch 等于给了一个"让本机去抓内网"的 SSRF 入口。
@@ -1364,7 +1364,10 @@ export function createRoutes(deps) {
             let dataUrl = null;
             try {
               const ret = await onebot.call('get_image', { file: String(it?.file || '') });
-              if (ret?.file && fs.existsSync(String(ret.file))) dataUrl = fileToDataUrl(String(ret.file));
+              const resolved = resolveMediaPath(ret?.file || ret?.path || ret?.filename);
+              if (resolved.ok) {
+                try { dataUrl = fileToDataUrl(resolved.path); } catch { /* URL fallback */ }
+              }
               if (!dataUrl && ret?.url) dataUrl = await safeToDataUrl(ret.url);
             } catch { /* 缓存没有 / 地址不可信就走下一条 */ }
             if (!dataUrl && it?.url) {

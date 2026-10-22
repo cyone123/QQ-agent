@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig, DATA_DIR } from './config.js';
 import { safeFetchBinary } from './safe-fetch.js';
+import { resolveMediaPath, readImageFile } from './media-paths.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary,
   findSticker, formatStickerList, applyStickerNote, markStickerUsed
@@ -33,7 +34,13 @@ export function localStickerPath(raw) {
   if (/^\/[A-Za-z]:[\\/]/.test(pathname)) pathname = pathname.slice(1);
   const root = path.resolve(stickerImagesDir()) + path.sep;
   const inside = (p) => String(p).toLowerCase().startsWith(root.toLowerCase());
-  const isFile = (p) => { try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch { return false; } };
+  const isFile = (p) => {
+    try {
+      const realRoot = fs.realpathSync(stickerImagesDir());
+      const rel = path.relative(realRoot, fs.realpathSync(p));
+      return rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) && fs.statSync(p).isFile();
+    } catch { return false; }
+  };
   const full = path.resolve(pathname);
   if (inside(full) && isFile(full)) return full;
   const base = path.basename(pathname);
@@ -327,10 +334,13 @@ export class StickerManager {
     if (file) {
       try {
         const ret = await this.onebot.call('get_image', { file: String(file) });
-        const srcPath = ret?.file && fs.existsSync(String(ret.file)) ? String(ret.file) : '';
+        const resolved = resolveMediaPath(ret?.file || ret?.path || ret?.filename);
+        const srcPath = resolved.ok ? resolved.path : '';
         if (srcPath) {
-          const buf = fs.readFileSync(srcPath);
-          if (buf.length) return buf;
+          try {
+            const buf = readImageFile(srcPath);
+            if (buf.length) return buf;
+          } catch { /* unreadable/oversized cache: try the returned URL */ }
         }
         // 有的实现返回可下载 url
         if (ret?.url) {

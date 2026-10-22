@@ -1,0 +1,21 @@
+{
+  "snowluma": {
+    "mode": "external",
+    "autoLaunch": false,
+    "wsUrl": "ws://snowluma:3001",
+    "httpUrl": "http://snowluma:3000",
+    "accessToken": "",
+    "httpAccessToken": ""
+  },
+  "server": { "host": "0.0.0.0", "port": 3210 },
+  "media": {
+    "sendLocalMode": "base64",
+    "pathMappings": [
+      { "remote": "/app/data", "local": "/mnt/snowluma/data" },
+      { "remote": "/app/.local/share", "local": "/mnt/snowluma/qq-share" }
+    ]
+  },
+  "extensions": { "hotReload": false },
+  "allow": { "groups": [], "private": [] },
+  "allowAllWhenEmpty": false
+}

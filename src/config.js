@@ -636,7 +636,8 @@ export function updateConfig(patch) {
   const tmp = `${CONFIG_FILE}.tmp`;
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
+    fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, CONFIG_FILE);
   } catch (error) { currentConfig = previous; throw error; }
   for (const listener of configListeners) listener(currentConfig, previous);

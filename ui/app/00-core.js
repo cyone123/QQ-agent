@@ -666,7 +666,7 @@ async function pollUntilReady(startedAt) {
     // startedAt 由 bootLoop 传入：曾经在这里声明，每轮重置，
     // 45 秒超时判定永远为 false，"启动超时"提示从未出现过
     if (Date.now() - startedAt > 45000) {
-      setLoadingStatus('启动超时。请确认项目内 snowluma 文件夹完整，或到设置页手动启动 SnowLuma。');
+      setLoadingStatus('控制台连接超时，请检查 Agent 服务和 SSH 端口转发。');
       return false;
     }
     return false;
@@ -705,8 +705,9 @@ function assessReadiness(cfg, status) {
   });
   const allowOk = (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty);
   checks.push({ ok: !!allowOk, label: allowOk ? `白名单：${(cfg.allow.groups || []).length} 个群 / ${(cfg.allow.private || []).length} 个好友` : '还没有配置白名单（必填）', fix: allowOk ? null : 'settings-allow' });
-  const obOk = status?.onebot?.connected;
-    checks.push({ ok: !!obOk, label: obOk ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}` : (status.onebot.diagnosis || 'OneBot（SnowLuma）未连接 —— 请到 SnowLuma 页签启动'), fix: obOk ? null : 'snowluma-tab' });
+  const external = cfg.snowluma?.mode === 'external';
+  const obOk = status?.onebot?.connected && (!external || !!status.onebot.self);
+  checks.push({ ok: !!obOk, label: obOk ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}` : (status?.onebot?.diagnosis || (external ? '外部 OneBot 尚未就绪，请核对地址、Token 和 QQ 登录状态' : 'OneBot（SnowLuma）未连接 —— 请到 SnowLuma 页签启动')), fix: obOk ? null : 'snowluma-tab' });
   return { ready: urlOk && modelOk && allowOk && obOk, checks };
 }
 
@@ -721,7 +722,9 @@ function renderBanner() {
     html = '⏸ 机器人已暂停，不会处理任何消息。';
   } else if (s && !s.onebot.connected && !s.onebot.everConnected) {
     show = true;
-    html = '🔌 OneBot（SnowLuma）还没连上：请确认 SnowLuma 已启动，且设置里的 WS/HTTP 地址正确。';
+    html = s.snowluma?.mode === 'external'
+      ? '🔌 外部 OneBot 尚未连接，可继续配置。请在 SnowLuma 页签测试连接并核对地址、Token 和账号。'
+      : '🔌 OneBot（SnowLuma）还没连上：请确认 SnowLuma 已启动，且设置里的 WS/HTTP 地址正确。';
   }
   if (show) {
     // 出现交给 .banner 自带的 pageIn；uiShow 只负责作废进行中的淡出并落实状态

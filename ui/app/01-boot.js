@@ -43,6 +43,16 @@ function updateReadinessDots(s) {
   const obConnected = !!s?.onebot?.connected;
   const cfg = state.config || {};
   const cfgReady = !!(cfg.api?.baseUrl && cfg.api?.model && (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty));
+  if (s?.snowluma?.mode === 'external') {
+    const states = [
+      [!!s.onebot?.self, s.onebot?.self ? 'QQ 账号已就绪' : '外部 QQ 账号尚未就绪'],
+      [s.onebot?.http?.available === true, 'HTTP API：' + (s.onebot?.http?.available === true ? '最近调用成功' : s.onebot?.http?.available === false ? '最近调用失败' : '尚未检查')],
+      [obConnected, obConnected ? '正向 WS 已连接' : (s.onebot?.diagnosis || '正向 WS 未连接')],
+      [cfgReady, cfgReady ? '配置已完成' : '配置未完成（点击前往设置）']
+    ];
+    states.forEach(([ok, title], i) => { dots[i].className = 'rdot' + (ok ? ' on' : ''); dots[i].title = title; });
+    return;
+  }
 
   // 圆点 0：QQ 内核
   dots[0].className = 'rdot' + (qqRunning ? ' on' : '');

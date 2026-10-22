@@ -1,0 +1,17 @@
+# Allow only the files explicitly copied by Dockerfile. User extensions and secrets never enter context.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!LICENSE
+!src/
+!src/**
+!ui/
+!ui/**
+!deploy/
+!deploy/config.linux.example.json
+!deploy/init-data.mjs
+**/.env*
+**/*.key
+**/*.pem
+**/*.log

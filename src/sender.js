@@ -3,10 +3,10 @@
 // - 分钟/小时限频（超限直接拒绝，工具会把错误告诉模型）
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
-import fs from 'node:fs';
 import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+import { mediaReference, resolveMediaPath, imageBase64, boundedInlineImage } from './media-paths.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -201,6 +201,8 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      const stickerKey = `__sticker__${sticker.id || sticker.url}`;
+      if (this.#isDuplicate(chatKey, stickerKey)) throw new Error('这张表情刚刚发过，已跳过');
       this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
       // ── 发送回退链（修"表情包经常发送失败"）────────────────────────────
@@ -216,11 +218,19 @@ export class SendQueue {
         atUserId: options.atUserId ?? null
       });
       let data;
-      const primary = String(sticker.url || '').trim();
+      let primary = String(sticker.url || '').trim();
       if (!primary) throw new Error(`表情 ${sticker.id} 没有可发送的图片地址`);
+      if (getConfig().media?.sendLocalMode === 'base64' && mediaReference(primary).kind === 'path') {
+        const { localStickerPath } = await import('./sticker-manager.js');
+        const local = localStickerPath(primary);
+        if (!local) throw new Error('收藏表情本地文件不可读');
+        primary = imageBase64(local);
+      }
+      if (mediaReference(primary).kind === 'inline') primary = boundedInlineImage(primary);
       try {
         data = await sendVia(primary);
       } catch (firstError) {
+        if (mediaReference(primary).kind === 'inline') throw firstError;
         if (primary.toLowerCase().startsWith('file:///')) {
           // 本地文件：读出来转 base64 内联再试一次 —— 协议端不同机 / 路径权限 /
           // file:/// 解析差异都可能拒收本地形态，而 base64 是最通用的兜底
@@ -228,7 +238,10 @@ export class SendQueue {
           const { localStickerPath } = await import('./sticker-manager.js');
           const p = localStickerPath(primary);
           let buf = null;
-          try { buf = p ? fs.readFileSync(p) : null; } catch { buf = null; }
+          if (p) {
+            const { readImageFile } = await import('./media-paths.js');
+            buf = readImageFile(p);
+          }
           if (!buf?.length) throw firstError;
           try {
             this.log?.(`[sender] 本地表情发送失败（${firstError?.message ?? firstError}），转 base64 重发`);
@@ -244,7 +257,11 @@ export class SendQueue {
           const cached = ret?.file || ret?.filename || '';
           if (cached) {
             this.log?.(`[sender] 表情直链发送失败（${firstError?.message ?? firstError}），改用协议端缓存重试`);
-            data = await sendVia(cached);
+            if (getConfig().media?.sendLocalMode === 'base64') {
+              const resolved = resolveMediaPath(cached);
+              if (resolved.ok) data = await sendVia(imageBase64(resolved.path));
+              else if (/^https?:\/\//i.test(ret?.url || '')) data = await sendVia(ret.url);
+            } else data = await sendVia(cached);
           }
         } catch { /* 继续走回退 2 */ }
         // 回退 2：下载直链转 base64 内联（此刻直链可能恰好还有效；或已被
@@ -258,6 +275,7 @@ export class SendQueue {
         }
         }
       }
+      this.#markSent(chatKey, stickerKey);
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
@@ -307,17 +325,22 @@ export class SendQueue {
       await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
 
       let data;
+      const base64Mode = getConfig().media?.sendLocalMode === 'base64';
+      const local = file ? mediaReference(file) : mediaReference(url);
+      if (base64Mode && (local.kind === 'invalid' || (file && local.kind !== 'path'))) throw new Error('本地图片必须是有效的绝对路径');
+      const prepared = base64Mode && local.kind === 'path' ? imageBase64(local.value)
+        : mediaReference(ref).kind === 'inline' ? boundedInlineImage(ref) : ref;
       try {
-        data = await this.onebot.sendImage(kind, id, ref, {
+        data = await this.onebot.sendImage(kind, id, prepared, {
           replyToMessageId: options.replyToMessageId ?? null,
           atUserId: options.atUserId ?? null
         });
       } catch (error) {
         // file:// 失败 → 回退 base64（协议端不同机、路径不可读、权限不足等）。
         // 只在**有 dataUrl 备份**且**确实是 local 路径**时才回退，避免无意义重试。
-        if (!file || !dataUrl) throw error;
+        if (base64Mode || !file || !dataUrl) throw error;
         this.log?.(`本地路径发送失败（${error?.message ?? error}），回退 base64 重试一次`);
-        data = await this.onebot.sendImage(kind, id, dataUrl, {
+        data = await this.onebot.sendImage(kind, id, boundedInlineImage(dataUrl), {
           replyToMessageId: options.replyToMessageId ?? null,
           atUserId: options.atUserId ?? null
         });
@@ -362,7 +385,18 @@ export class SendQueue {
       }
       this.#checkRate(chatKey);
       await sleep(randInt(800, 1800));   // 视频/多图体积大，停顿比文字长一点
-      const data = await this.onebot.sendSegments(kind, id, segs);
+      const prepared = segs.map((segment) => {
+        const ref = mediaReference(segment.data?.file);
+        if (segment.type === 'video' && getConfig().snowluma?.mode === 'external' && ref.kind !== 'url') {
+          throw new Error('外部模式发送本地视频需要共享出站目录，当前请使用可访问的 HTTP(S) URL');
+        }
+        if (segment.type !== 'image') return segment;
+        if (getConfig().media?.sendLocalMode === 'base64' && ref.kind === 'invalid') throw new Error('图片路径无效');
+        const file = getConfig().media?.sendLocalMode === 'base64' && ref.kind === 'path' ? imageBase64(ref.value)
+          : ref.kind === 'inline' ? boundedInlineImage(segment.data.file) : segment.data?.file;
+        return { ...segment, data: { ...segment.data, file } };
+      });
+      const data = await this.onebot.sendSegments(kind, id, prepared);
       this.#markSent(chatKey, `__media__${dedupeKey}`);   // 成功后才记账
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null });

@@ -5,6 +5,11 @@
 一个跑在你自己电脑上的 QQ 群聊机器人：装完双击启动，扫码登录，填个模型 Key 就能用。
 事件驱动 + 无状态会话架构，每次处理的 token 成本恒定可控；所有操作都在图形控制台里完成，不用碰命令行。
 从 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 彻底改造而来的独立 QQ agent 应用。
+
+## Linux 服务器接入现有 SnowLuma
+
+服务器部署使用独立 Node 服务，通过正向 WS + HTTP 连接现有 SnowLuma，无需安装桌面客户端。提供非 root Dockerfile、Compose、只读媒体卷映射和图片 Base64 发送。请按 [Linux 部署文档](doc/linux-deployment.md) 初始化数据卷并通过 SSH 隧道访问控制台；真实 SnowLuma/媒体联调待 P6 验收。镜像运行验证状态见 [P3–P5 实施记录](doc/linux-external-onebot-p3-p5.md)。
+
 ## 能实现什么
 - **像真人一样混群**：被 @ 或被叫到时回话，平时看心情插嘴；会发文字、表情包、戳一戳，会引用、会 @ 人，知道什么时候该闭嘴
 - **记住每个群友**：双向长期记忆——它记得谁是什么风格、爱什么梗、雷点是什么，下次聊天自然带上；记忆页随时可查看、手动编辑
